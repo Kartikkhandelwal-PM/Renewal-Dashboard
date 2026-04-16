@@ -21,6 +21,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { cn } from './lib/utils';
 
+const logoUrl = `${import.meta.env.BASE_URL}logo.svg`;
+
 const CLOUD_PRODUCTS  = ['Spectrum Cloud', 'ExpressGST', 'ExpressITR', 'ExpressTDS'] as const;
 const DESKTOP_PRODUCTS = ['Zen TDS', 'Zen IT', 'Spectrum', 'Zen PDF Signer', 'Zen eXBace', 'Taxsuite'] as const;
 const ALL_PRODUCTS = [...CLOUD_PRODUCTS, ...DESKTOP_PRODUCTS] as const;
@@ -665,7 +667,7 @@ function Dashboard() {
         {/* Row 1: Brand + Actions */}
         <div className="px-4 sm:px-6 pt-4 pb-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <img src="/logo.svg" alt="KDK Softwares" className="w-10 h-10 rounded-xl object-contain shrink-0 shadow-md" />
+            <img src={logoUrl} alt="KDK Softwares" className="w-10 h-10 rounded-xl object-contain shrink-0 shadow-md" />
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-black tracking-tight text-slate-900 leading-tight">Renewal Intelligence</h1>
@@ -1971,7 +1973,7 @@ function LoginPage({ onLogin }: { onLogin: () => void }) {
         {/* Logo + product name */}
         <div className="relative z-10">
           <div className="flex items-center gap-3 mb-12">
-            <img src="/logo.svg" alt="KDK" className="w-12 h-12 rounded-2xl bg-white/10 p-1" />
+            <img src={logoUrl} alt="KDK" className="w-12 h-12 rounded-2xl bg-white/10 p-1" />
             <div>
               <p className="text-white font-black text-lg leading-tight">KDK Softwares</p>
               <p className="text-white/50 text-xs font-medium">Intelligent Business Suite</p>
@@ -2021,7 +2023,7 @@ function LoginPage({ onLogin }: { onLogin: () => void }) {
 
           {/* Mobile logo */}
           <div className="flex items-center gap-2 mb-8 lg:hidden">
-            <img src="/logo.svg" alt="KDK" className="w-8 h-8" />
+            <img src={logoUrl} alt="KDK" className="w-8 h-8" />
             <span className="font-black text-slate-800">KDK Softwares</span>
           </div>
 
@@ -2179,7 +2181,7 @@ function DataLoadingScreen({ onComplete }: { onComplete: () => void }) {
         transition={{ type: 'spring', stiffness: 260, damping: 20 }}
         className="flex items-center gap-3 mb-10"
       >
-        <img src="/logo.svg" alt="KDK" className="w-14 h-14 drop-shadow-lg" />
+        <img src={logoUrl} alt="KDK" className="w-14 h-14 drop-shadow-lg" />
         <div>
           <p className="font-black text-slate-800 text-xl">KDK Softwares</p>
           <p className="text-slate-400 text-xs">Renewal Intelligence Dashboard</p>
