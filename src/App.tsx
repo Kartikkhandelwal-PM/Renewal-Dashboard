@@ -14,12 +14,13 @@ import {
 import {
   format, subDays, addDays, isWithinInterval, differenceInDays,
   parseISO, parse, startOfDay, endOfDay,
-  startOfMonth, endOfMonth, subMonths,
+  startOfMonth, endOfMonth, subMonths, addMonths,
   startOfWeek, endOfWeek, startOfYear, endOfYear, startOfQuarter, endOfQuarter
 } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { cn } from './lib/utils';
+import { fitPattern, expectedForGroup, allocate, renewalBucket, windowClosed, type ProjGroup } from './lib/projection';
 
 const logoUrl = `${import.meta.env.BASE_URL}logo.svg`;
 
@@ -38,6 +39,7 @@ interface Subscription {
   salesGroup: 'KDK' | 'Self' | 'Partner';
   industry: 'DIFM' | 'DIY';
   platform: 'Cloud' | 'Desktop';
+  plan: 'Freemium' | 'Regular';
   product: Product;
   amount: number;
 }
@@ -148,6 +150,7 @@ const generateMockData = (): Subscription[] => {
       salesGroup: salesGroups[Math.floor(Math.random() * salesGroups.length)],
       industry: industries[Math.floor(Math.random() * industries.length)],
       platform,
+      plan: Math.random() < 0.3 ? 'Freemium' : 'Regular',
       product,
       amount: Math.floor(Math.random() * 5000) + 1000,
     });
@@ -177,6 +180,7 @@ function Dashboard() {
     salesGroups: [] as string[],   // empty = All
     industry: 'All',
     platform: 'All',
+    plan: 'All',
     products: [] as string[],      // empty = All
   });
   const [viewMode, setViewMode] = useState<'numbers' | 'percentages'>('numbers');
@@ -194,8 +198,9 @@ function Dashboard() {
       const inSales    = filters.salesGroups.length === 0 || filters.salesGroups.includes(d.salesGroup);
       const inIndustry = filters.industry === 'All' || d.industry === filters.industry;
       const inPlatform = filters.platform === 'All' || d.platform === filters.platform;
+      const inPlan     = filters.plan === 'All' || d.plan === filters.plan;
       const inProduct  = filters.products.length === 0 || filters.products.includes(d.product);
-      return inDate && inSales && inIndustry && inPlatform && inProduct;
+      return inDate && inSales && inIndustry && inPlatform && inPlan && inProduct;
     };
 
     return {
@@ -209,8 +214,9 @@ function Dashboard() {
     const inSales    = filters.salesGroups.length === 0 || filters.salesGroups.includes(d.salesGroup);
     const inIndustry = filters.industry === 'All' || d.industry === filters.industry;
     const inPlatform = filters.platform === 'All' || d.platform === filters.platform;
+    const inPlan     = filters.plan === 'All' || d.plan === filters.plan;
     const inProduct  = filters.products.length === 0 || filters.products.includes(d.product);
-    return inSales && inIndustry && inPlatform && inProduct;
+    return inSales && inIndustry && inPlatform && inPlan && inProduct;
   }), [filters]);
 
   // ─── ANALYTICS ─────────────────────────────────────────────────────────────
@@ -340,6 +346,7 @@ function Dashboard() {
         'Sales Group': d.salesGroup,
         'Industry': d.industry,
         'Platform': d.platform,
+        'Plan': d.plan,
         'Product': d.product,
         'Amount': d.amount,
         'Status': d.renewalDate ? 'Renewed' : 'Pending',
@@ -541,6 +548,7 @@ function Dashboard() {
     </div>` : ''}
     ${filters.salesGroups.length > 0 ? `<div style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);border-radius:99px;padding:4px 13px"><span style="color:#c7d2fe;font-size:11px;font-weight:600">Groups: ${filters.salesGroups.join(', ')}</span></div>` : ''}
     ${filters.platform !== 'All' ? `<div style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);border-radius:99px;padding:4px 13px"><span style="color:#c7d2fe;font-size:11px;font-weight:600">Platform: ${filters.platform}</span></div>` : ''}
+    ${filters.plan !== 'All' ? `<div style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);border-radius:99px;padding:4px 13px"><span style="color:#c7d2fe;font-size:11px;font-weight:600">Plan: ${filters.plan}</span></div>` : ''}
     ${filters.products.length > 0 ? `<div style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);border-radius:99px;padding:4px 13px"><span style="color:#c7d2fe;font-size:11px;font-weight:600">Products: ${filters.products.join(', ')}</span></div>` : ''}
   </div>
 </div>
@@ -787,6 +795,12 @@ function Dashboard() {
             onChange={v => setFilters(p => ({ ...p, platform: v }))}
             options={['All', 'Cloud', 'Desktop']}
             allLabel="All Platforms"
+          />
+          <FilterSelect
+            value={filters.plan}
+            onChange={v => setFilters(p => ({ ...p, plan: v }))}
+            options={['All', 'Freemium', 'Regular']}
+            allLabel="All Plans"
           />
           <MultiSelectFilter
             values={filters.products}
@@ -1154,6 +1168,8 @@ function Dashboard() {
           )}
         </section>
 
+        <ProjectionsSection data={allFilteredData} viewMode={viewMode} />
+
       </main>
 
       {/* Date Picker Dropdown */}
@@ -1180,15 +1196,17 @@ function DatePickerModal({
   anchor,
   onApply,
   onClose,
+  presets: customPresets,
 }: {
   currentRange: { start: string; end: string };
   currentLabel: string;
   anchor: { top: number; left: number };
   onApply: (range: { start: string; end: string }, label: string) => void;
   onClose: () => void;
+  presets?: { label: string; range: { start: string; end: string } }[];
 }) {
   const now = new Date();
-  const presets = [
+  const defaultPresets = [
     {
       label: 'This Week',
       range: {
@@ -1248,8 +1266,11 @@ function DatePickerModal({
     },
   ];
 
+  const presets = customPresets ?? defaultPresets;
   const [tempRange, setTempRange] = useState(currentRange);
-  const [activePreset, setActivePreset] = useState(currentLabel);
+  const [activePreset, setActivePreset] = useState(
+    presets.find(p => p.range.start === currentRange.start && p.range.end === currentRange.end)?.label ?? currentLabel
+  );
 
   const handlePreset = (label: string, range: { start: string; end: string }) => {
     setActivePreset(label);
@@ -1371,6 +1392,635 @@ function DatePickerModal({
 // ─── SUB-COMPONENTS ──────────────────────────────────────────────────────────
 
 // Shared section header inside cards
+// ─── PROJECTIONS ─────────────────────────────────────────────────────────────
+
+const STAGES: Subscription['stage'][] = ['1st Year', '2nd Year', '3rd Year+'];
+const iso = (d: Date) => format(d, 'yyyy-MM-dd');
+
+// Number box that can be cleared while typing (no forced 0 / "023"); commits on every valid keystroke.
+// onCommit returns the value actually applied (after limits) so the box can show it.
+function NumCell({ value, onCommit, decimal, className, ...rest }: {
+  value: number;
+  onCommit: (n: number) => number;
+  decimal?: boolean;
+  className?: string;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'>) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode={decimal ? 'decimal' : 'numeric'}
+      value={draft ?? String(value)}
+      onFocus={e => e.currentTarget.select()}
+      onChange={e => {
+        let t = e.target.value.replace(decimal ? /[^\d.]/g : /[^\d]/g, '');
+        if (decimal) t = t.replace(/^(\d*\.\d*).*$/, (_, a) => a);        // keep only the first dot
+        t = t.replace(/^0+(?=\d)/, '');                                    // 023 -> 23
+        if (t === '' || t === '.') { setDraft(t); return; }                 // let the user clear / start a decimal
+        const typed = Number(t);
+        const applied = onCommit(typed);
+        setDraft(applied === typed ? t : null);                              // show the limited value if it was capped
+      }}
+      onBlur={() => { if (draft === '' || draft === '.') onCommit(0); setDraft(null); }}
+      className={className}
+    />
+  );
+}
+
+function ProjectionsSection({ data, viewMode }: { data: Subscription[]; viewMode: 'numbers' | 'percentages' }) {
+  const today = new Date();
+  // Step 1: past period (the basis for the forecast)  ·  Step 2: forecast period
+  const [act, setAct] = useState({ start: iso(startOfMonth(subMonths(today, 3))), end: iso(endOfMonth(subMonths(today, 1))) });   // last 3 full months
+  const [fc, setFc] = useState({ start: iso(startOfMonth(today)), end: iso(endOfMonth(addMonths(today, 2))) });                    // this month + next 2
+  const [picker, setPicker] = useState<{ kind: 'past' | 'fc'; anchor: { top: number; left: number } } | null>(null);
+  // full-month presets (a period always starts on the 1st and ends on the last day of a month)
+  const lastMonthEnd = endOfMonth(subMonths(today, 1));
+  const fyStartYear = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1;
+  const fyEnd = format(new Date(fyStartYear + 1, 2, 31), 'yyyy-MM-dd');
+  const pastFrom = (n: number) => iso(startOfMonth(subMonths(today, n)));
+  const pastPresets = [
+    { label: 'Last Month', range: { start: pastFrom(1), end: iso(lastMonthEnd) } },
+    { label: 'This Month so far', range: { start: iso(startOfMonth(today)), end: iso(today) } },
+    { label: 'Last 3 Months', range: { start: pastFrom(3), end: iso(lastMonthEnd) } },
+    { label: 'Last 6 Months', range: { start: pastFrom(6), end: iso(lastMonthEnd) } },
+    { label: 'Last 12 Months', range: { start: pastFrom(12), end: iso(lastMonthEnd) } },
+    { label: 'Last FY', range: { start: format(new Date(fyStartYear - 1, 3, 1), 'yyyy-MM-dd'), end: format(new Date(fyStartYear, 2, 31), 'yyyy-MM-dd') } },
+  ];
+  const fcFrom = (n: number) => iso(startOfMonth(addMonths(today, n)));
+  const fcPresets = [
+    { label: 'Rest of This Month', range: { start: iso(addDays(today, 1)), end: iso(endOfMonth(today)) } },
+    { label: 'Next Month', range: { start: fcFrom(1), end: iso(endOfMonth(addMonths(today, 1))) } },
+    { label: 'This + Next 2 Months', range: { start: fcFrom(0), end: iso(endOfMonth(addMonths(today, 2))) } },
+    { label: 'Next 3 Months', range: { start: fcFrom(1), end: iso(endOfMonth(addMonths(today, 3))) } },
+    { label: 'Next 6 Months', range: { start: fcFrom(1), end: iso(endOfMonth(addMonths(today, 6))) } },
+    { label: 'Rest of This FY', range: { start: fcFrom(0), end: fyEnd } },
+  ];
+  const [stickyTop, setStickyTop] = useState(130);
+  useEffect(() => {
+    const measure = () => {
+      const h = document.querySelector('.sticky.top-0') as HTMLElement | null;
+      if (h) setStickyTop(Math.round(h.getBoundingClientRect().height));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
+  const pickerEl = useRef<HTMLElement | null>(null);
+  const PICKER_H = 440;   // approx. height of the dropdown
+  const openPicker = (kind: 'past' | 'fc', el: HTMLElement) => {
+    pickerEl.current = el;
+    // make room: if the dropdown would run off the bottom, scroll the page up (keeping the button below the sticky header)
+    const r = el.getBoundingClientRect();
+    const overflow = r.bottom + PICKER_H - window.innerHeight;
+    if (overflow > 0) window.scrollBy({ top: Math.min(overflow + 16, Math.max(0, r.top - 140)), behavior: 'smooth' });
+    setPicker({ kind, anchor: { top: r.bottom + 6, left: r.left } });
+  };
+  // keep the dropdown attached to its button while the page scrolls / resizes
+  useEffect(() => {
+    if (!picker) return;
+    const follow = () => {
+      const el = pickerEl.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      setPicker(p => (p ? { ...p, anchor: { top: r.bottom + 6, left: r.left } } : p));
+    };
+    window.addEventListener('scroll', follow, { passive: true });
+    window.addEventListener('resize', follow);
+    return () => { window.removeEventListener('scroll', follow); window.removeEventListener('resize', follow); };
+  }, [!!picker]);
+  // As-of today: a renewal dated in the future has not happened yet
+  const asOf = endOfDay(today);
+  const known = useMemo(() => data.map(d => (d.renewalDate && d.renewalDate > asOf ? { ...d, renewalDate: null } : d)), [data, iso(today)]);
+  // Manual overrides of the M<0 … M3+ % (of Due) per stage; null = use the model's value
+  const emptyOv = () => ({ '1st Year': Array(6).fill(null), '2nd Year': Array(6).fill(null), '3rd Year+': Array(6).fill(null) } as Record<Subscription['stage'], (number | null)[]>);
+  const [ov, setOv] = useState(emptyOv);
+  // Month × stage overrides (whole subscriptions) — lets any one of the 6 months × 3 stages be changed on its own
+  const [mov, setMov] = useState<Record<string, (number | null)[]>>({});
+  const isDirty = STAGES.some(st => ov[st].some(v => v !== null)) || (Object.values(mov) as (number | null)[][]).some(a => a.some(v => v !== null));
+  const reset = () => { setOv(emptyOv()); setMov({}); };
+  // a period-level edit of a stage column replaces any month-level edits in that column
+  const clearMov = (stages: Subscription['stage'][], k: number) => setMov(p => {
+    const n: Record<string, (number | null)[]> = {};
+    (Object.entries(p) as [string, (number | null)[]][]).forEach(([key, arr]) => { n[key] = stages.some(st => key.endsWith(`|${st}`)) ? arr.map((v, j) => (j === k ? null : v)) : arr; });
+    return n;
+  });
+
+  useEffect(() => { setOv(emptyOv()); setMov({}); }, [act.start, act.end, fc.start, fc.end]);
+
+  const fcStart = startOfDay(parseISO(fc.start)), fcEnd = endOfDay(parseISO(fc.end));
+  const actStart = startOfDay(parseISO(act.start)), actEnd = endOfDay(parseISO(act.end));
+  const fcValid = fcEnd >= fcStart;
+  const actValid = actEnd >= actStart && actEnd < fcStart;
+  const actOverlap = actEnd >= fcStart;
+
+  // Model: learn the renewal pattern from the past period, then project every (expiry month × stage) group in the forecast period
+  const baseline = useMemo(() => {
+    const train = actValid ? known.filter(d => d.expiryDate >= actStart && d.expiryDate <= actEnd) : [];
+    const pattern = fitPattern(known, train, asOf);
+    const groups: Record<string, ProjGroup> = {};
+    if (fcValid && actValid) known.forEach(d => {
+      if (d.expiryDate < fcStart || d.expiryDate > fcEnd) return;
+      const key = format(d.expiryDate, 'MMM yy');
+      const g = (groups[key] ??= { date: startOfMonth(d.expiryDate), st: {} });
+      const x = (g.st[d.stage] ??= { n: 0, known: Array(6).fill(0), E: Array(6).fill(0) });
+      x.n++;
+      const kr = renewalBucket(d);
+      if (kr >= 0) x.known[kr]++;
+    });
+    const byStage = {} as Record<Subscription['stage'], { pct: number[] }>;
+    const knownCnt = {} as Record<Subscription['stage'], number[]>;
+    STAGES.forEach(st => {
+      const sum = Array(6).fill(0), kn = Array(6).fill(0);
+      let D = 0;
+      Object.values(groups).forEach(g => {
+        const x = g.st[st];
+        if (!x) return;
+        x.E = expectedForGroup(x.n, x.known, pattern[st], g.date, asOf);
+        D += x.n;
+        for (let k = 0; k < 6; k++) { sum[k] += x.E[k]; kn[k] += x.known[k]; }
+      });
+      byStage[st] = { pct: sum.map(v => (D ? (v / D) * 100 : 0)) };
+      knownCnt[st] = kn;
+    });
+    return { byStage, pattern, knownCnt, groups, sample: train.length };
+  }, [known, act, fc, actValid, fcValid]);
+
+  // effective % for a stage: manual override, else past-period value (scaled down if the total passes 100)
+  const effPct = (st: Subscription['stage']) => {
+    const pct = baseline.byStage[st].pct.map((p, i) => ov[st][i] ?? p);
+    const sum = pct.reduce((a, x) => a + x, 0);
+    return sum > 100 ? pct.map(x => (x / sum) * 100) : pct;
+  };
+
+  // Subscriptions due per stage in the forecast period — turns % into counts and back
+  const stageDue = useMemo(() => {
+    const out: Record<Subscription['stage'], number> = { '1st Year': 0, '2nd Year': 0, '3rd Year+': 0 };
+    if (fcValid) data.forEach(d => { if (d.expiryDate >= fcStart && d.expiryDate <= fcEnd) out[d.stage]++; });
+    return out;
+  }, [data, fc]);
+
+  const calc = useMemo(() => {
+    const monthMap: Record<string, MonthMatrixRow> = {};
+    const ensure = (d: Date) => {
+      const key = format(d, 'MMM yy');
+      return (monthMap[key] ??= { month: key, sortKey: startOfMonth(d).getTime(), total: emptyBucket(), byStage: {} });
+    };
+    const src: Record<string, { a: boolean; f: boolean }> = {};
+    const mark = (key: string, k: 'a' | 'f') => { (src[key] ??= { a: false, f: false })[k] = true; };
+    type StageBuckets = Partial<Record<Subscription['stage'], BucketStats>>;
+    const splitA: Record<string, StageBuckets> = {};
+    const splitF: Record<string, StageBuckets> = {};
+    const pastS: StageBuckets = {};
+    const fcS: StageBuckets = {};
+    let aDue = 0, aRen = 0;
+
+    if (fcValid && actValid) known.forEach(d => {
+      if (d.expiryDate >= actStart && d.expiryDate <= actEnd) {
+        const row = ensure(d.expiryDate);
+        mark(row.month, 'a');
+        addToBucket((pastS[d.stage] ??= emptyBucket()), d);
+        addToBucket((((splitA[row.month] ??= {})[d.stage]) ??= emptyBucket()), d);
+        addToBucket((row.byStage[d.stage] ??= emptyBucket()), d);
+        aDue++;
+        if (d.renewalDate) aRen++;
+      }
+    });
+
+    let fDue = 0, fDone = 0, baseDone = 0, baseDue = 0;
+
+    // The assumptions table is the source of truth: work out whole-period counts per stage and M-column first,
+    // then spread each one across the months (largest remainder) so that the months always add up to the table.
+    const aggList = (Object.values(baseline.groups) as ProjGroup[]).sort((x, y) => x.date.getTime() - y.date.getTime());
+    const cellsByStage = {} as Record<Subscription['stage'], number[][]>;   // [monthIndex][M column]
+    STAGES.forEach(st => {
+      const ns = aggList.map(m => m.st[st]?.n ?? 0);
+      const D = ns.reduce((a, x) => a + x, 0);
+      const counts = effPct(st).map(p => Math.round((D * p) / 100));
+      let over = counts.reduce((a, x) => a + x, 0) - D;
+      while (over > 0) { counts[counts.indexOf(Math.max(...counts))]--; over--; }
+      // spread each period-level count over the months in proportion to the model's expectation for that month
+      const per = counts.map((c, k) => allocate(c, aggList.map(m => m.st[st]?.E[k] ?? 0), ns));   // [M column][monthIndex]
+      cellsByStage[st] = ns.map((_, mi) => per.map(a => a[mi]));
+    });
+
+    const stageCells = {} as Record<Subscription['stage'], number[]>;
+    STAGES.forEach(st => { stageCells[st] = Array(6).fill(0); });
+    aggList.forEach((m, mi) => {
+      const row = ensure(m.date);
+      mark(row.month, 'f');
+      STAGES.forEach(st => {
+        const s = m.st[st];
+        if (!s) return;
+        const baseRs = baseline.byStage[st].pct.reduce((a, x) => a + x, 0) / 100;
+        const due = s.n;
+        const cells = cellsByStage[st][mi].slice();
+        const mo = mov[`${row.month}|${st}`];
+        if (mo) mo.forEach((v, k) => { if (v !== null && v !== undefined) cells[k] = v; });
+        // a group can never renew more than it has: trim edited-around cells first, then the edited ones
+        let over = cells.reduce((a, x) => a + x, 0) - due;
+        for (const lockedPass of [false, true]) {
+          while (over > 0) {
+            let idx = -1;
+            cells.forEach((v, k) => { const locked = !!mo && mo[k] != null; if (locked === lockedPass && v > 0 && (idx < 0 || v > cells[idx])) idx = k; });
+            if (idx < 0) break;
+            cells[idx]--; over--;
+          }
+        }
+        cells.forEach((v, k) => { stageCells[st][k] += v; });
+        const done = cells.reduce((a, x) => a + x, 0);
+        const b = (row.byStage[st] ??= emptyBucket());
+        b.total += due;
+        b.mMinus += cells[0]; b.m0 += cells[1]; b.m1 += cells[2]; b.m2 += cells[3]; b.m3 += cells[4]; b.m3plus += cells[5];
+        b.pending += Math.max(0, due - done);
+        const fs = (fcS[st] ??= emptyBucket());
+        fs.total += due; fs.mMinus += cells[0]; fs.m0 += cells[1]; fs.m1 += cells[2]; fs.m2 += cells[3]; fs.m3 += cells[4]; fs.m3plus += cells[5]; fs.pending += Math.max(0, due - done);
+        const sf = ((splitF[row.month] ??= {})[st] ??= emptyBucket());
+        sf.total += due; sf.mMinus += cells[0]; sf.m0 += cells[1]; sf.m1 += cells[2]; sf.m2 += cells[3]; sf.m3 += cells[4]; sf.m3plus += cells[5]; sf.pending += Math.max(0, due - done);
+        fDue += due; fDone += done;
+        baseDue += s.n; baseDone += s.n * baseRs;
+      });
+    });
+
+    // month totals = sum of stage rows
+    const rows = Object.values(monthMap).sort((a, b) => a.sortKey - b.sortKey);
+    rows.forEach(row => {
+      const t = emptyBucket();
+      Object.values(row.byStage).forEach(b => {
+        (Object.keys(t) as (keyof BucketStats)[]).forEach(k => { t[k] += b![k]; });
+      });
+      row.total = t;
+    });
+    const tags: Record<string, 'Actual' | 'Forecast' | 'Actual + Forecast'> = {};
+    Object.entries(src).forEach(([k, v]) => { tags[k] = v.a && v.f ? 'Actual + Forecast' : v.a ? 'Actual' : 'Forecast'; });
+    const splits: Record<string, { actual: StageBuckets; forecast: StageBuckets }> = {};
+    Object.entries(src).forEach(([k, v]) => { if (v.a && v.f) splits[k] = { actual: splitA[k] ?? {}, forecast: splitF[k] ?? {} }; });
+    const toRows = (m: Record<string, StageBuckets>): MonthMatrixRow[] => Object.entries(m).map(([k, g]) => {
+      const t = emptyBucket();
+      STAGES.forEach(st => { const b = g[st]; if (b) (Object.keys(t) as (keyof BucketStats)[]).forEach(key => { t[key] += b[key]; }); });
+      return { month: k, sortKey: parse(k, 'MMM yy', new Date()).getTime(), total: t, byStage: g };
+    }).sort((x, y) => x.sortKey - y.sortKey);
+    const pastRows = toRows(splitA), fcRows = toRows(splitF);
+    return { rows, tags, splits, pastRows, fcRows, pastS, fcS, stageCells, fDue, fDone, baseDone, baseDue, aDue, aRen };
+  }, [known, fc, act, ov, mov, baseline]);
+
+  const { pastRows, fcRows, pastS, fcS, stageCells, fDue, fDone, baseDone, baseDue, aDue, aRen } = calc;
+  const scenRet = fDue > 0 ? (fDone / fDue) * 100 : 0;
+  const baseRet = baseDue > 0 ? (baseDone / baseDue) * 100 : 0;
+  const dlt = (a: number, b: number) => b === 0 ? 0 : ((a - b) / b) * 100;
+  const rangeText = (r: { start: string; end: string }) => `${format(parseISO(r.start), 'MMM d')} – ${format(parseISO(r.end), 'MMM d, yyyy')}`;
+  const totDue = aDue + fDue, totRen = aRen + fDone;
+  const sumStages = (g: Partial<Record<Subscription['stage'], BucketStats>>) => {
+    const t = emptyBucket();
+    STAGES.forEach(st => { const b = g[st]; if (b) (Object.keys(t) as (keyof BucketStats)[]).forEach(k => { t[k] += b[k]; }); });
+    return t;
+  };
+  const summary = actValid && fcValid ? [
+    { key: 'sum-past', label: 'Past period', sub: rangeText(act), tag: 'Actual' as const, total: sumStages(pastS), byStage: pastS },
+    { key: 'sum-fc', label: 'Forecast period', sub: rangeText(fc), tag: 'Forecast' as const, total: sumStages(fcS), byStage: fcS },
+  ] : [];
+  const colorOf = ['text-emerald-700', 'text-blue-700', 'text-amber-700', 'text-orange-600', 'text-red-500', 'text-red-700'];
+  const stageAccent = { '1st Year': 'border-l-indigo-400', '2nd Year': 'border-l-violet-400', '3rd Year+': 'border-l-emerald-400' } as const;
+  const stageTotal = (st: Subscription['stage']) => baseline.byStage[st].pct.reduce((a, x, i) => a + (ov[st][i] ?? x), 0);
+  // over 100%? In Numbers mode compare whole subscriptions (ignores tiny rounding differences)
+  const isOver = (st: Subscription['stage']) =>
+    viewMode === 'numbers'
+      ? [0, 1, 2, 3, 4, 5].reduce((a, i) => a + Math.round(((ov[st][i] ?? baseline.byStage[st].pct[i]) / 100) * stageDue[st]), 0) > stageDue[st]
+      : stageTotal(st) > 100.05;
+  const anyOver = STAGES.some(isOver);
+
+  // ── Total row: edit all stages at once (split in proportion to what each stage has now) ──
+  const numMode = viewMode === 'numbers';
+  const curPct = (st: Subscription['stage'], i: number) => (stageDue[st] ? (stageCells[st][i] / stageDue[st]) * 100 : 0);
+  const totalDue = STAGES.reduce((a, st) => a + stageDue[st], 0);
+  const colCnt = (i: number) => STAGES.reduce((a, st) => a + stageCells[st][i], 0);
+  const colPct = (i: number) => (totalDue ? STAGES.reduce((a, st) => a + curPct(st, i) * stageDue[st], 0) / totalDue : 0);
+  const setTotalCell = (i: number, raw: number): number => {
+    if (totalDue === 0) return 0;
+    const next: Record<string, number> = {};
+    let applied: number;
+    if (numMode) {
+      const T = Math.min(totalDue, Math.max(0, Math.round(raw)));
+      const cur = STAGES.map(st => Math.round((curPct(st, i) / 100) * stageDue[st]));
+      const room = STAGES.map((st, k) => {
+        const others = [0, 1, 2, 3, 4, 5].reduce((a, j) => (j === i ? a : a + Math.round((curPct(st, j) / 100) * stageDue[st])), 0);
+        return Math.max(0, stageDue[st] - others);
+      });
+      applied = Math.min(T, room.reduce((a, x) => a + x, 0));
+      const parts = allocate(applied, cur, room);
+      STAGES.forEach((st, k) => { next[st] = stageDue[st] ? (parts[k] / stageDue[st]) * 100 : 0; });
+    } else {
+      const T = Math.min(100, Math.max(0, raw));
+      applied = Math.round(T * 10) / 10;
+      const cur = colPct(i);
+      STAGES.forEach(st => {
+        const others = [0, 1, 2, 3, 4, 5].reduce((a, j) => (j === i ? a : a + curPct(st, j)), 0);
+        next[st] = Math.min(Math.max(0, 100 - others), cur > 0 ? (curPct(st, i) * T) / cur : T);
+      });
+    }
+    setOv(p => {
+      const n = { ...p };
+      STAGES.forEach(st => { n[st] = p[st].map((x, j) => (j === i ? next[st] : x)); });
+      return n;
+    });
+    clearMov(STAGES, i);
+    return applied;
+  };
+  // Done = the sum of the cells shown (never above Due), so the table, KPI cards and matrix always agree
+  const doneCount = (st: Subscription['stage']) =>
+    Math.min(stageDue[st], stageCells[st].reduce((a, x) => a + x, 0));
+  const sumDone = STAGES.reduce((a, st) => a + doneCount(st), 0);
+
+  const pill = 'flex items-center gap-2 bg-white border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 px-3 py-1.5 rounded-xl transition-all group';
+  const pickerPill = (kind: 'past' | 'fc', label: string, range: { start: string; end: string }) => (
+    <button onClick={e => openPicker(kind, e.currentTarget)} className={pill}>
+      <CalendarDays className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+      <span className="text-xs font-bold text-indigo-600">{label}:</span>
+      <span className="text-xs font-semibold text-slate-600">{rangeText(range)}</span>
+      <ChevronDown className="w-3.5 h-3.5 text-slate-400 group-hover:text-indigo-400 transition-colors" />
+    </button>
+  );
+
+  // small change chip, same look as the dashboard KPI cards
+  const chipFor = (d: number, unit: string) => {
+    const up = d > 0.05, down = d < -0.05;
+    return (
+      <span className={cn('inline-flex items-center gap-0.5 text-[10px] font-bold px-2 py-0.5 rounded-lg', !up && !down ? 'bg-slate-100 text-slate-500' : up ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700')}>
+        {up && <ArrowUpRight className="w-3 h-3" />}{down && <ArrowDownRight className="w-3 h-3" />}
+        {d > 0.05 ? '+' : ''}{d.toFixed(1)}{unit}
+      </span>
+    );
+  };
+
+  // ── Both cards use ONE table (the matrix table), so every column lines up.
+  //    The stage block goes on top of it, then the months below. ──
+  const pastTot = sumStages(pastS);
+  const pastRetPct = bucketRet(pastTot);
+  const mCols = ['mMinus', 'm0', 'm1', 'm2', 'm3', 'm3plus'] as const;
+  const cellTint = ['text-emerald-600', 'text-blue-600', 'text-amber-600', 'text-orange-600', 'text-red-600', 'text-red-800'];
+  const readCell = (n: number, total: number) => (numMode ? (n === 0 ? '—' : n.toLocaleString()) : (total > 0 ? `${((n / total) * 100).toFixed(1)}%` : '—'));
+  const retColorOf = (r: number) => (r >= 80 ? 'text-emerald-600 font-black' : r >= 65 ? 'text-indigo-600 font-bold' : 'text-rose-600 font-black');
+  const caption = (key: string, text: string) => (
+    <tr key={key} data-cap><td colSpan={11} className="px-4 pt-3 pb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400 bg-white">{text}</td></tr>
+  );
+  const pastLine = (key: string, label: string, b: BucketStats, rowCls: string, strong: boolean) => (
+    <tr key={key} className={cn('h-12', rowCls)}>
+      <td className={cn('px-4 text-sm font-bold', strong ? 'text-slate-800' : 'text-slate-600')}>{label}</td>
+      <td className="px-3 text-right tabular-nums font-bold text-slate-800">{numMode ? b.total.toLocaleString() : '100%'}</td>
+      {mCols.map((k, i) => (
+        <td key={k} className={cn('px-3 text-right tabular-nums', b[k] > 0 ? cn(cellTint[i], 'font-semibold') : 'text-slate-300')}>{readCell(b[k], b.total)}</td>
+      ))}
+      <td className={cn('px-3 text-right tabular-nums font-black bg-rose-50', b.pending > 0 ? 'text-rose-600' : 'text-slate-300')}>{readCell(b.pending, b.total)}</td>
+      <td className="px-3 text-right tabular-nums font-semibold text-slate-800">{bucketDone(b).toLocaleString()}</td>
+      <td className={cn('px-3 text-right tabular-nums', retColorOf(bucketRet(b)))}>{bucketRet(b).toFixed(1)}%</td>
+    </tr>
+  );
+  const bigStat = (label: string, value: string, tone: string, chip?: React.ReactNode) => (
+    <div className="min-w-0">
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 truncate">{label}</p>
+      <p className={cn('text-xl sm:text-2xl font-black tracking-tight leading-tight mt-0.5', tone)}>{value}</p>
+      <div className="mt-1 min-h-[20px]">{chip}</div>
+    </div>
+  );
+  const inputCls = (edited: boolean, bold: boolean) => cn(
+    'w-full min-w-[36px] rounded-lg border px-1.5 py-1.5 text-right text-xs tabular-nums outline-none transition-all focus:ring-2 focus:ring-amber-100 focus:border-amber-400 disabled:opacity-50',
+    bold ? 'font-bold' : 'font-semibold',
+    edited ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700'
+  );
+
+  // "1–10 Oct" under a month that the period only partly covers
+  const partialNotes = (rows: MonthMatrixRow[], from: Date, to: Date) => {
+    const out: Record<string, string> = {};
+    rows.forEach(r => {
+      const ms = new Date(r.sortKey), me = endOfMonth(ms);
+      const s = from > ms ? from : ms, e = to < me ? to : me;
+      if (format(s, 'd') !== '1' || format(e, 'yyyy-MM-dd') !== format(me, 'yyyy-MM-dd')) {
+        out[r.month] = format(s, 'd') === format(e, 'd') ? format(s, 'd MMM') : `${format(s, 'd')} – ${format(e, 'd MMM')}`;
+      }
+    });
+    return out;
+  };
+  const pastNotes = actValid ? partialNotes(pastRows, actStart, actEnd) : {};
+  const fcNotes = fcValid ? partialNotes(fcRows, fcStart, fcEnd) : {};
+
+  // forecast: one month × one stage cell (shown when a month is opened)
+  const cellOf = (sb: BucketStats, k: number) => [sb.mMinus, sb.m0, sb.m1, sb.m2, sb.m3, sb.m3plus][k];
+  const monthStageCell = (month: string, stage: Subscription['stage'], k: number, sb: BucketStats) => {
+    const key = `${month}|${stage}`;
+    const n = sb.total;
+    const cur = cellOf(sb, k);
+    const room = Math.max(0, n - [0, 1, 2, 3, 4, 5].reduce((a, j) => (j === k ? a : a + cellOf(sb, j)), 0));
+    const edited = mov[key]?.[k] != null;
+    const pctOf = (c: number) => (n ? Math.round((c / n) * 1000) / 10 : 0);
+    return (
+      <NumCell
+        decimal={!numMode}
+        disabled={n === 0}
+        value={numMode ? cur : pctOf(cur)}
+        title={`${stage} · ${month} — max ${numMode ? room : `${pctOf(room)}%`} (Due minus the other cells in this row)`}
+        onCommit={raw => {
+          const cnt = Math.min(room, Math.max(0, numMode ? Math.round(raw) : Math.round((raw / 100) * n)));
+          setMov(p => { const arr = (p[key] ?? Array(6).fill(null)).slice(); arr[k] = cnt; return { ...p, [key]: arr }; });
+          return numMode ? cnt : pctOf(cnt);
+        }}
+        className={inputCls(edited, false)}
+      />
+    );
+  };
+
+  // past: read-only stage block
+  const pastTop = (
+    <>
+      {caption('cap-stage', 'By stage')}
+      {STAGES.map(st => pastLine(st, st, pastS[st] ?? emptyBucket(), cn('bg-white border-l-4 border-t border-slate-100', stageAccent[st]), false))}
+      {pastLine('total', 'Total', pastTot, 'bg-slate-50 border-l-4 border-l-slate-300 border-t-2 border-slate-200', true)}
+      {caption('cap-month', 'By month')}
+    </>
+  );
+
+  // forecast: the same block, but every M cell can be edited
+  const fcTop = (
+    <>
+      {caption('cap-stage', 'By stage · edit any cell')}
+      {STAGES.map(st => {
+        const total = stageTotal(st);
+        const over = isOver(st);
+        const due = stageDue[st];
+        const doneCnt = doneCount(st);
+        const retPct = due ? (doneCnt / due) * 100 : total;
+        const bp = baseline.byStage[st].pct;
+        return (
+          <tr key={st} className={cn('h-12 bg-white border-l-4 border-t border-slate-100', stageAccent[st])}>
+            <td className="px-4 text-sm font-bold text-slate-600">{st}</td>
+            <td className="px-3 text-right tabular-nums font-bold text-slate-800">{numMode ? due.toLocaleString() : '100%'}</td>
+            {[0, 1, 2, 3, 4, 5].map(i => {
+              const shown = numMode ? stageCells[st][i] : Math.round(curPct(st, i) * 10) / 10;
+              const baseShown = numMode ? Math.round((bp[i] / 100) * due) : Math.round(bp[i] * 10) / 10;
+              const edited = shown !== baseShown;
+              // room left in this row = Due (or 100%) minus the other cells
+              const othersPct = [0, 1, 2, 3, 4, 5].reduce((a, j) => (j === i ? a : a + curPct(st, j)), 0);
+              const othersCnt = [0, 1, 2, 3, 4, 5].reduce((a, j) => (j === i ? a : a + Math.round((curPct(st, j) / 100) * due)), 0);
+              const roomCnt = Math.max(0, due - othersCnt);
+              const roomPct = Math.max(0, 100 - othersPct);
+              return (
+                <td key={i} className="px-1! py-1.5">
+                  <NumCell
+                    decimal={!numMode}
+                    disabled={numMode && due === 0}
+                    value={shown}
+                    title={`Model: ${bp[i].toFixed(1)}% · already renewed: ${baseline.knownCnt[st][i]} · learned pattern: ${(baseline.pattern[st][i] * 100).toFixed(1)}% · max ${numMode ? roomCnt : `${roomPct.toFixed(1)}%`}`}
+                    onCommit={raw => {
+                      const applied = numMode ? Math.min(roomCnt, Math.max(0, Math.round(raw))) : Math.min(Math.round(roomPct * 10) / 10, Math.max(0, raw));
+                      const n = numMode ? (due > 0 ? (applied / due) * 100 : 0) : applied;
+                      setOv(p => ({ ...p, [st]: p[st].map((x, j) => (j === i ? n : x)) }));
+                      clearMov([st], i);
+                      return applied;
+                    }}
+                    className={inputCls(edited, false)}
+                  />
+                </td>
+              );
+            })}
+            <td className="px-3 text-right tabular-nums font-black text-rose-600 bg-rose-50/60">
+              {numMode ? Math.max(0, due - doneCnt).toLocaleString() : `${Math.max(0, 100 - retPct).toFixed(1)}%`}
+            </td>
+            <td className="px-3 text-right tabular-nums font-semibold text-slate-800">{doneCnt.toLocaleString()}</td>
+            <td className={cn('px-3 text-right tabular-nums', over ? 'text-rose-600 font-black' : retColorOf(retPct))}>{retPct.toFixed(1)}%</td>
+          </tr>
+        );
+      })}
+      <tr className="h-12 border-t-2 border-amber-200 bg-amber-50/50 border-l-4 border-l-amber-300">
+        <td className="px-4 text-sm font-bold text-amber-900">Total</td>
+        <td className="px-3 text-right tabular-nums font-bold text-slate-800">{numMode ? totalDue.toLocaleString() : '100%'}</td>
+        {[0, 1, 2, 3, 4, 5].map(i => {
+          const now = numMode ? colCnt(i) : Math.round(colPct(i) * 10) / 10;
+          const baseCnt = STAGES.reduce((a, st) => a + Math.round((baseline.byStage[st].pct[i] / 100) * stageDue[st]), 0);
+          const basePct = totalDue ? STAGES.reduce((a, st) => a + baseline.byStage[st].pct[i] * stageDue[st], 0) / totalDue : 0;
+          const base = numMode ? baseCnt : Math.round(basePct * 10) / 10;
+          const edited = now !== base;
+          return (
+            <td key={i} className="px-1! py-1.5">
+              <NumCell
+                decimal={!numMode}
+                disabled={totalDue === 0}
+                value={now}
+                title="Edit the total — it is split across the stages in proportion"
+                onCommit={raw => setTotalCell(i, raw)}
+                className={inputCls(edited, true)}
+              />
+            </td>
+          );
+        })}
+        <td className="px-3 text-right tabular-nums font-black text-rose-600 bg-rose-50/60">
+          {numMode ? Math.max(0, totalDue - sumDone).toLocaleString() : `${totalDue ? Math.max(0, 100 - (sumDone / totalDue) * 100).toFixed(1) : '0.0'}%`}
+        </td>
+        <td className="px-3 text-right tabular-nums font-bold text-slate-900">{sumDone.toLocaleString()}</td>
+        <td className={cn('px-3 text-right tabular-nums', retColorOf(totalDue ? (sumDone / totalDue) * 100 : 0))}>{totalDue ? ((sumDone / totalDue) * 100).toFixed(1) : '0.0'}%</td>
+      </tr>
+      {caption('cap-month', 'By month · open a month to edit its stages')}
+    </>
+  );
+
+  return (
+    <div className="space-y-4">
+
+      {/* ── PERIODS ───────────────────────────────────────────────────────── */}
+      <section className="glass-card overflow-hidden">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-start justify-between gap-3 flex-wrap">
+          <SectionHeader
+            icon={<TrendingUp className="w-4 h-4" />}
+            title="Renewal Projection"
+            subtitle="Choose the past period, then the period to forecast"
+            color="indigo"
+          />
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
+            <InfoTooltip text="How it works: the renewal pattern is learned from the past period using only renewals whose window has fully closed, blended with long-run history when the sample is small. Renewals that have already happened count as actual; the rest are projected from the pattern. Renewals dated after today are treated as not yet happened." />
+            <button
+              onClick={reset}
+              disabled={!isDirty}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold border bg-white text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:text-slate-600"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+        <div className="px-5 py-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          {/* period pills */}
+          <div className="flex flex-wrap items-center gap-2">
+            {pickerPill('past', 'Past', act)}
+            <span className="text-slate-300 font-bold mx-1">→</span>
+            {pickerPill('fc', 'Forecast', fc)}
+          </div>
+          {/* what the M columns mean — one shared legend for both tables */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {[['M<0', 'before expiry month'], ['M0', 'same month'], ['M+1', '1 mo late'], ['M+2', '2 mo late'], ['M+3', '3 mo late'], ['M3+', '3+ mo late']].map(([k, v], i) => (
+              <span key={k} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 border border-slate-100 text-[11px] font-semibold text-slate-500 whitespace-nowrap">
+                <span className={cn('font-black', colorOf[i])}>{k}</span>{v}
+              </span>
+            ))}
+          </div>
+        </div>
+        {(!fcValid || !actValid || baseline.sample === 0) && (
+          <p className={cn('px-5 pb-4 -mt-1 text-[11px] font-semibold', baseline.sample === 0 && fcValid && actValid ? 'text-amber-600' : 'text-rose-600')}>
+            {!fcValid ? 'Forecast end date must be on or after the start date.'
+              : actOverlap ? 'Past period must end before the forecast starts.'
+              : !actValid ? 'Past period end date must be on or after the start date.'
+              : 'No expiries found in the past period with the current filters.'}
+          </p>
+        )}
+      </section>
+
+      {/* ── PAST | FORECAST — side by side on wide screens, stacked on narrow ─ */}
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+
+        {/* PAST — same card as "Renewal Stage Matrix" */}
+        <div className="glass-card overflow-clip flex flex-col">
+          <div className="px-5 pt-5 pb-3 border-b border-slate-100">
+            <SectionHeader
+              icon={<Activity className="w-4 h-4" />}
+              title="Past Period"
+              subtitle={`${aDue.toLocaleString()} due · ${aRen.toLocaleString()} renewed · ${aDue ? ((aRen / aDue) * 100).toFixed(1) : '0.0'}% retention`}
+              color="indigo"
+              badge={actValid ? rangeText(act) : undefined}
+            />
+          </div>
+          <MatrixTable data={pastRows} viewMode={viewMode} topRows={pastTop} monthNote={pastNotes} stickyTop={stickyTop} compact />
+        </div>
+
+        {/* FORECAST — same card as "Compare Period Matrix" */}
+        <div className="glass-card overflow-clip flex flex-col border-amber-200/50">
+          <div className="px-5 pt-5 pb-3 border-b border-amber-100">
+            <SectionHeader
+              icon={<History className="w-4 h-4" />}
+              title="Forecast Period"
+              subtitle={`${fDue.toLocaleString()} due · ${fDone.toLocaleString()} renewed · ${scenRet.toFixed(1)}% retention (${scenRet - pastRetPct >= 0 ? '+' : ''}${(scenRet - pastRetPct).toFixed(1)} pp vs past)`}
+              color="amber"
+              badge={fcValid ? rangeText(fc) : undefined}
+            />
+          </div>
+          <MatrixTable data={fcRows} viewMode={viewMode} topRows={fcTop} monthNote={fcNotes} stageCell={monthStageCell} stickyTop={stickyTop} isCompare compact />
+          {anyOver && (
+            <p className="px-5 py-2.5 text-[11px] font-semibold text-rose-600 border-t border-slate-100">A stage total is above 100% — it is scaled down to 100% in the matrix.</p>
+          )}
+        </div>
+      </section>
+
+      <AnimatePresence>
+        {picker && (
+          <DatePickerModal
+            currentRange={picker.kind === 'past' ? act : fc}
+            currentLabel="Custom"
+            presets={picker.kind === 'past' ? pastPresets : fcPresets}
+            anchor={picker.anchor}
+            onApply={range => { (picker.kind === 'past' ? setAct : setFc)(range); setPicker(null); }}
+            onClose={() => setPicker(null)}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function SectionHeader({
   icon, title, subtitle, color, badge
 }: {
@@ -1402,7 +2052,7 @@ function SectionHeader({
       {badge && (
         <span className={cn(
           'text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shrink-0',
-          color === 'amber' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-50 text-indigo-500'
+          color === 'amber' ? 'bg-amber-100 text-amber-700' : color === 'emerald' ? 'bg-emerald-100 text-emerald-700' : color === 'purple' ? 'bg-purple-100 text-purple-700' : 'bg-indigo-50 text-indigo-500'
         )}>
           {badge}
         </span>
@@ -1425,11 +2075,19 @@ const bucketDone = (b: BucketStats) => b.mMinus + b.m0 + b.m1 + b.m2 + b.m3 + b.
 const bucketRet  = (b: BucketStats) => b.total > 0 ? (bucketDone(b) / b.total) * 100 : 0;
 
 function MatrixTable({
-  data, viewMode, isCompare = false
+  data, viewMode, isCompare = false, tags, splits, summary, topRows, monthNote, compact = false, stageCell, stickyTop
 }: {
   data: MonthMatrixRow[];
   viewMode: 'numbers' | 'percentages';
   isCompare?: boolean;
+  tags?: Record<string, 'Actual' | 'Forecast' | 'Actual + Forecast'>;
+  splits?: Record<string, { actual: Partial<Record<Subscription['stage'], BucketStats>>; forecast: Partial<Record<Subscription['stage'], BucketStats>> }>;
+  topRows?: React.ReactNode;
+  compact?: boolean;   // no explanation row under the headers
+  stickyTop?: number;  // freeze the column headers this many px from the top of the screen
+  stageCell?: (month: string, stage: Subscription['stage'], k: number, sb: BucketStats) => React.ReactNode;   // editable M cells in the stage sub-rows
+  monthNote?: Record<string, string>;
+  summary?: { key: string; label: string; sub: string; tag: 'Actual' | 'Forecast'; total: BucketStats; byStage: Partial<Record<Subscription['stage'], BucketStats>> }[];
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const STAGES = ['1st Year', '2nd Year', '3rd Year+'] as const;
@@ -1448,38 +2106,63 @@ function MatrixTable({
   // Return true when a cell should show a real value (not a dash)
   const hasVal = (n: number) => n > 0;
 
+  // one table row from a bucket (used for the Actual / Forecast groups of a mixed month)
+  const tint = ['text-emerald-600', 'text-blue-600', 'text-amber-600', 'text-orange-600', 'text-red-600', 'text-red-800'];
+  const bucketRow = (key: string, label: React.ReactNode, sb: BucketStats, trCls: string, tdCls: string, strong: boolean, onClick?: () => void) => {
+    const vals = [sb.mMinus, sb.m0, sb.m1, sb.m2, sb.m3, sb.m3plus];
+    return (
+      <tr key={key} className={trCls} onClick={onClick}>
+        <td className={tdCls}>{label}</td>
+        <td className={cn('px-3 py-2.5 text-right tabular-nums', strong ? 'font-bold text-slate-800' : 'font-medium text-slate-600')}>{sb.total}</td>
+        {vals.map((v, i) => (
+          <td key={i} className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(v) ? cn(tint[i], strong ? 'font-bold' : 'font-semibold') : 'text-slate-300')}>{fmt(v, sb.total)}</td>
+        ))}
+        <td className={cn('px-3 py-2.5 text-right tabular-nums font-bold', isCompare ? 'bg-rose-50/60' : 'bg-rose-50', sb.pending > 0 ? 'text-rose-500' : 'text-slate-300')}>{sb.pending > 0 ? sb.pending : '—'}</td>
+        <td className={cn('px-3 py-2.5 text-right tabular-nums', strong ? 'font-bold text-slate-800' : 'font-medium text-slate-700')}>{bucketDone(sb)}</td>
+        <td className={cn('px-3 py-2.5 text-right tabular-nums', retColor(bucketRet(sb)))}>{bucketRet(sb).toFixed(1)}%</td>
+      </tr>
+    );
+  };
+
   const retColor = (r: number) =>
     r >= 80 ? 'text-emerald-600 font-black' : r >= 65 ? 'text-indigo-600 font-bold' : 'text-rose-600 font-black';
 
-  if (data.length === 0) {
+  if (data.length === 0 && !topRows) {
     return <div className="py-10 text-center text-slate-400 text-sm">No data for the selected period</div>;
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm min-w-[560px]">
+    // overflow-x-clip (md and up) keeps the frozen header working; small screens still scroll sideways
+    <div className={cn('overflow-x-auto', stickyTop !== undefined && 'md:overflow-x-clip')}>
+      <table className={cn('w-full border-collapse text-sm min-w-[560px]', compact && '[&_th:not(:first-child)]:px-2 [&_td:not(:first-child)]:px-2 [&_tbody_tr:not([data-cap])]:h-12 [&_tbody_td:not([colspan])]:py-0')}>
 
         {/* ── Column headers ── */}
         <thead>
-          <tr className={cn('border-b-2 text-xs font-bold uppercase tracking-wide',
-            isCompare ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-slate-50'
-          )}>
-            <th className="px-4 py-2.5 text-left text-slate-700 w-[22%]">Month / Stage</th>
-            <th className="px-3 py-2.5 text-right text-slate-600 w-[7%]">Due</th>
-            <th className="px-3 py-2.5 text-right text-emerald-700 w-[7%]" title="Renewed before expiry month">M &lt;0</th>
-            <th className="px-3 py-2.5 text-right text-blue-700 w-[7%]"   title="Renewed in same month as expiry">M 0</th>
-            <th className="px-3 py-2.5 text-right text-amber-700 w-[7%]"  title="Renewed 1 month after expiry">M+1</th>
-            <th className="px-3 py-2.5 text-right text-orange-600 w-[7%]" title="Renewed 2 months after expiry">M+2</th>
-            <th className="px-3 py-2.5 text-right text-red-500 w-[7%]"   title="Renewed 3 months after expiry">M+3</th>
-            <th className="px-3 py-2.5 text-right text-red-700 w-[7%]"   title="Renewed more than 3 months after expiry">M 3+</th>
-            <th className={cn('px-3 py-2.5 text-right w-[9%] font-black',
-              isCompare ? 'text-rose-600 bg-rose-50/60' : 'text-rose-700 bg-rose-50'
+          <tr
+            style={stickyTop !== undefined ? { top: stickyTop } : undefined}
+            className={cn('border-b-2 text-xs font-bold uppercase tracking-wide',
+              stickyTop !== undefined && 'sticky z-[5] shadow-[0_2px_6px_-3px_rgba(15,23,42,0.18)]',
+              // frozen header: fully solid so rows scrolling underneath never show through
+              stickyTop !== undefined && (isCompare ? '[&>th]:bg-amber-50' : '[&>th]:bg-slate-50'),
+              isCompare ? cn('border-amber-200', stickyTop !== undefined ? 'bg-amber-50' : 'bg-amber-50/40') : 'border-slate-200 bg-slate-50'
+            )}>
+            <th className="whitespace-nowrap px-4 py-2.5 text-left text-slate-700 w-[22%]">Month / Stage</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-slate-600 w-[7%]">Due</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-emerald-700 w-[7%]" title="Renewed before expiry month">M &lt;0</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-blue-700 w-[7%]"   title="Renewed in same month as expiry">M 0</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-amber-700 w-[7%]"  title="Renewed 1 month after expiry">M+1</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-orange-600 w-[7%]" title="Renewed 2 months after expiry">M+2</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-red-500 w-[7%]"   title="Renewed 3 months after expiry">M+3</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-red-700 w-[7%]"   title="Renewed more than 3 months after expiry">M 3+</th>
+            <th className={cn('whitespace-nowrap px-3 py-2.5 text-right w-[9%] font-black',
+              isCompare ? 'text-rose-600 bg-rose-50/60' : 'text-rose-700 bg-rose-50',
+              stickyTop !== undefined && 'bg-rose-50!'
             )}>Pending</th>
-            <th className="px-3 py-2.5 text-right text-slate-700 w-[7%]">Done</th>
-            <th className="px-3 py-2.5 text-right text-slate-600 w-[9%]">Ret %</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-slate-700 w-[7%]">Done</th>
+            <th className="whitespace-nowrap px-3 py-2.5 text-right text-slate-600 w-[9%]">Ret %</th>
           </tr>
           {/* Subtitle row */}
-          <tr className={cn('border-b text-[11px] text-slate-500',
+          {!compact && <tr className={cn('border-b text-[11px] text-slate-500',
             isCompare ? 'border-amber-100 bg-amber-50/20' : 'border-slate-100 bg-white'
           )}>
             <td className="px-4 py-1" />
@@ -1495,10 +2178,64 @@ function MatrixTable({
             )}>not renewed</td>
             <td className="px-3 py-1 text-right">renewed</td>
             <td className="px-3 py-1 text-right">done/due</td>
-          </tr>
+          </tr>}
         </thead>
 
         <tbody className="divide-y divide-slate-100">
+          {topRows}
+          {summary && summary.length === 2 && (() => {
+            const [p, f] = summary;
+            const share = (n: number, b: BucketStats) => (b.total > 0 ? (n / b.total) * 100 : 0);
+            const cols = ['mMinus', 'm0', 'm1', 'm2', 'm3', 'm3plus'] as const;
+            const diff = (n: number) => `${n > 0.05 ? '+' : ''}${n.toFixed(1)}`;
+            const dPending = share(f.total.pending, f.total) - share(p.total.pending, p.total);
+            const dRet = bucketRet(f.total) - bucketRet(p.total);
+            const caption = (t: string) => (
+              <tr key={t}><td colSpan={11} className="px-4 pt-3 pb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400 bg-white">{t}</td></tr>
+            );
+            return (
+              <>
+                {caption('Period comparison')}
+                {summary.map(it => {
+                  const isExp = expanded.has(it.key);
+                  return (
+                    <React.Fragment key={it.key}>
+                      {bucketRow(it.key, (
+                        <div className="flex items-center gap-2">
+                          <ChevronRight className={cn('w-3.5 h-3.5 shrink-0 text-slate-400 transition-transform', isExp && 'rotate-90')} />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-sm text-slate-800 whitespace-nowrap">{it.label}</span>
+                              <span className={cn('text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full whitespace-nowrap', it.tag === 'Actual' ? 'bg-emerald-50 text-emerald-600' : 'bg-purple-50 text-purple-600')}>{it.tag}</span>
+                            </div>
+                            <span className="block text-[10px] font-medium text-slate-400 mt-0.5 whitespace-nowrap">{it.sub}</span>
+                          </div>
+                        </div>
+                      ), it.total, 'cursor-pointer select-none border-t border-slate-200 bg-indigo-50/40 hover:bg-indigo-50/70 transition-colors', 'px-4 py-2.5', true, () => toggle(it.key))}
+                      {isExp && STAGES.map(st => {
+                        const sb = it.byStage[st];
+                        if (!sb || sb.total === 0) return null;
+                        const accent = st === '1st Year' ? 'border-l-indigo-400' : st === '2nd Year' ? 'border-l-violet-400' : 'border-l-emerald-400';
+                        return bucketRow(`${it.key}-${st}`, st, sb, cn('bg-white border-l-4', accent), 'px-4 py-2.5 pl-9 text-slate-500 font-medium text-sm', false);
+                      })}
+                    </React.Fragment>
+                  );
+                })}
+                <tr className="bg-white border-t border-slate-200">
+                  <td className="px-4 py-2.5 text-xs font-bold text-slate-600">Forecast vs Past <span className="text-[10px] font-medium text-slate-400">(share of Due, in pp)</span></td>
+                  <td className="px-3 py-2.5 text-right text-slate-300">—</td>
+                  {cols.map((k, i) => {
+                    const d = share(f.total[k], f.total) - share(p.total[k], p.total);
+                    return <td key={k} className={cn('px-3 py-2.5 text-right tabular-nums text-xs font-semibold', Math.abs(d) < 0.05 ? 'text-slate-300' : tint[i])}>{Math.abs(d) < 0.05 ? '—' : diff(d)}</td>;
+                  })}
+                  <td className={cn('px-3 py-2.5 text-right tabular-nums text-xs font-bold bg-rose-50', Math.abs(dPending) < 0.05 ? 'text-slate-300' : dPending > 0 ? 'text-rose-600' : 'text-emerald-600')}>{Math.abs(dPending) < 0.05 ? '—' : diff(dPending)}</td>
+                  <td className="px-3 py-2.5 text-right text-slate-300">—</td>
+                  <td className={cn('px-3 py-2.5 text-right tabular-nums text-xs font-bold', Math.abs(dRet) < 0.05 ? 'text-slate-300' : dRet > 0 ? 'text-emerald-600' : 'text-rose-600')}>{Math.abs(dRet) < 0.05 ? '—' : `${diff(dRet)} pp`}</td>
+                </tr>
+                {caption('By month')}
+              </>
+            );
+          })()}
           {data.map(row => {
             const isExp = expanded.has(row.month);
             const b = row.total;
@@ -1525,9 +2262,20 @@ function MatrixTable({
                         isCompare ? 'text-amber-400' : 'text-slate-400',
                         isExp && 'rotate-90'
                       )} />
-                      <span className={cn('font-bold text-sm', isCompare ? 'text-amber-900' : 'text-slate-800')}>
-                        {row.month}
-                      </span>
+                      <div>
+                        <span className={cn('font-bold text-sm whitespace-nowrap', isCompare ? 'text-amber-900' : 'text-slate-800')}>
+                          {row.month}
+                        </span>
+                        {monthNote?.[row.month] && <span className="block text-[10px] font-medium text-slate-400 whitespace-nowrap">{monthNote[row.month]}</span>}
+                      </div>
+                      {tags?.[row.month] && (
+                        <span className={cn(
+                          'text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full whitespace-nowrap',
+                          tags[row.month] === 'Actual' ? 'bg-emerald-50 text-emerald-600'
+                            : tags[row.month] === 'Forecast' ? 'bg-purple-50 text-purple-600'
+                            : 'bg-indigo-50 text-indigo-600'
+                        )}>{tags[row.month]}</span>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-3 text-right font-bold tabular-nums text-slate-800">{b.total}</td>
@@ -1548,9 +2296,31 @@ function MatrixTable({
                   <td className={cn('px-3 py-3 text-right tabular-nums', retColor(r))}>{r.toFixed(1)}%</td>
                 </tr>
 
+                {/* Months that contain both: Actual (1st/2nd/3rd Year + total) and Forecast (1st/2nd/3rd Year + total) */}
+                {isExp && splits?.[row.month] && (['actual', 'forecast'] as const).map(kind => {
+                  const g = splits[row.month][kind];
+                  const tot = emptyBucket();
+                  STAGES.forEach(st => { const sb = g[st]; if (sb) (Object.keys(tot) as (keyof BucketStats)[]).forEach(k => { tot[k] += sb[k]; }); });
+                  const isAct = kind === 'actual';
+                  return (
+                    <React.Fragment key={kind}>
+                      {bucketRow(kind, isAct ? 'Actual' : 'Forecast', tot,
+                        cn('bg-slate-50/70 border-l-4 border-t border-slate-200', isAct ? 'border-l-emerald-400' : 'border-l-purple-400'),
+                        cn('px-4 py-2.5 pl-9 text-sm font-bold', isAct ? 'text-emerald-700' : 'text-purple-700'), true)}
+                      {STAGES.map(st => {
+                        const sb = g[st];
+                        if (!sb || sb.total === 0) return null;
+                        const accent = st === '1st Year' ? 'border-l-indigo-400' : st === '2nd Year' ? 'border-l-violet-400' : 'border-l-emerald-400';
+                        return bucketRow(`${kind}-${st}`, st, sb, cn('bg-white border-l-4 hover:bg-slate-50/60 transition-colors', accent),
+                          'px-4 py-2.5 pl-14 text-slate-500 font-medium text-sm', false);
+                      })}
+                    </React.Fragment>
+                  );
+                })}
+
                 {/* Stage sub-rows */}
                 <AnimatePresence>
-                  {isExp && STAGES.map(stage => {
+                  {isExp && !splits?.[row.month] && STAGES.map(stage => {
                     const sb = row.byStage[stage];
                     if (!sb || sb.total === 0) return null;
                     const sd = bucketDone(sb);
@@ -1572,12 +2342,12 @@ function MatrixTable({
                       >
                         <td className="px-4 py-2.5 pl-9 text-slate-500 font-medium text-sm">{stage}</td>
                         <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-600">{sb.total}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.mMinus) ? 'text-emerald-600 font-semibold' : 'text-slate-300')}>{fmt(sb.mMinus, sb.total)}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m0)     ? 'text-blue-600 font-semibold'    : 'text-slate-300')}>{fmt(sb.m0,     sb.total)}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m1)     ? 'text-amber-600'                 : 'text-slate-300')}>{fmt(sb.m1,     sb.total)}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m2)     ? 'text-orange-600'                : 'text-slate-300')}>{fmt(sb.m2,     sb.total)}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m3)     ? 'text-red-600'                   : 'text-slate-300')}>{fmt(sb.m3,     sb.total)}</td>
-                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m3plus) ? 'text-red-800'                   : 'text-slate-300')}>{fmt(sb.m3plus, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.mMinus) ? 'text-emerald-600 font-semibold' : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 0, sb) : fmt(sb.mMinus, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m0)     ? 'text-blue-600 font-semibold'    : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 1, sb) : fmt(sb.m0, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m1)     ? 'text-amber-600'                 : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 2, sb) : fmt(sb.m1, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m2)     ? 'text-orange-600'                : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 3, sb) : fmt(sb.m2, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m3)     ? 'text-red-600'                   : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 4, sb) : fmt(sb.m3, sb.total)}</td>
+                        <td className={cn('px-3 py-2.5 text-right tabular-nums', hasVal(sb.m3plus) ? 'text-red-800'                   : 'text-slate-300')}>{stageCell ? stageCell(row.month, stage, 5, sb) : fmt(sb.m3plus, sb.total)}</td>
                         <td className={cn(
                           'px-3 py-2.5 text-right tabular-nums font-bold',
                           isCompare ? 'bg-rose-50/60' : 'bg-rose-50',
